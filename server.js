@@ -1,33 +1,52 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getFormsCollection, getDocumentsCollection, getFormStatusesCollection, getRequestsCollection, getPaidsCollection, getcatwiseformCollection } = require('./modules/models/forms');
 const { ObjectId } = require('mongodb');
 const fs = require('fs');
 const { formsRoutes, usersRoutes, DocsRoutes } = require('./modules/MainRoutes');
 
+
+
+// Set up S3 client for Cloudflare R2
+const s3 = new S3Client({
+  region: 'auto',  // Cloudflare R2 uses auto-region
+  endpoint: process.env.CLOUDFLARE_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.CLOUDFLARE_ACCESS_KEY_ID,
+    secretAccessKey: process.env.CLOUDFLARE_SECRET_ACCESS_KEY,
+  },
+});
+
+
 const app = express();
 
 // Ensure uploads directory exists
-if (!fs.existsSync('uploads')) {
-  fs.mkdirSync('uploads');
-}
+// if (!fs.existsSync('uploads')) {
+//   fs.mkdirSync('uploads');
+// }
 
 // Enable CORS for all routes
 app.use(cors());
 app.use(express.json()); // To parse JSON bodies
 
 // Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/');
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
-  },
-});
-const upload = multer({ storage });
+// const storage = multer.diskStorage({
+//   destination: (req, file, cb) => {
+//     cb(null, 'uploads/');
+//   },
+//   filename: (req, file, cb) => {
+//     cb(null, `${Date.now()}-${file.originalname}`);
+//   },
+// });
+// const upload = multer({ storage });
+
+// Configure multer for file uploads (memory storage for uploading to R2 directly)
+const storage = multer.memoryStorage();  // Use memory storage to pass buffer
+const upload = multer({ storage: storage });
 
 app.use('/api/forms', formsRoutes)
 app.use('/api/auth', usersRoutes)
@@ -161,16 +180,55 @@ app.get('/docsrequired/:id', async (req, res) => {
 });
 
 // Route to handle file uploads
+// app.post('/upload', upload.single('file'), async (req, res) => {
+//   const { doc, formId, userId } = req.body; // Make sure to get formId and userId from the request body
+//   const filePath = req.file.path;
+
+//   try {
+//     const collection = await getDocumentsCollection();
+    
+//     // Check if a document entry exists for the user and form ID
+//     let documentEntry = await collection.findOne({ formid: formId, user: userId });
+    
+//     if (!documentEntry) {
+//       // If not, create a new entry
+//       const newDocument = {
+//         formid: formId,
+//         user: userId,
+//       };
+//       await collection.insertOne(newDocument);
+//       documentEntry = newDocument;
+//     }
+
+//     // Update the document entry with the uploaded file URL
+//     const updateResult = await collection.updateOne(
+//       { formid: formId, user: userId },
+//       { $set: { [doc]: filePath } }
+//     );
+
+//     if (updateResult.modifiedCount === 1) {
+//       res.status(200).send('File uploaded successfully');
+//     } else {
+//       res.status(500).send('Failed to update document status');
+//     }
+//   } catch (error) {
+//     console.error('Error uploading file:', error);
+//     res.status(500).send('Error uploading file');
+//   }
+// });
+
+// Upload endpoint: handles both saving to the server and Cloudflare R2
+// Upload endpoint: handles saving directly to Cloudflare R2
 app.post('/upload', upload.single('file'), async (req, res) => {
-  const { doc, formId, userId } = req.body; // Make sure to get formId and userId from the request body
-  const filePath = req.file.path;
+  const { doc, formId, userId } = req.body;
+  const file = req.file;
 
   try {
     const collection = await getDocumentsCollection();
-    
+
     // Check if a document entry exists for the user and form ID
     let documentEntry = await collection.findOne({ formid: formId, user: userId });
-    
+
     if (!documentEntry) {
       // If not, create a new entry
       const newDocument = {
@@ -181,20 +239,33 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       documentEntry = newDocument;
     }
 
-    // Update the document entry with the uploaded file URL
+    // Upload file to Cloudflare R2 directly (no local saving)
+    const uploadParams = {
+      Bucket: process.env.CLOUDFLARE_BUCKET_NAME,
+      Key: Date.now().toString() + '-' + file.originalname,  // File name
+      Body: file.buffer,
+      ACL: 'public-read',  // Change this as needed (e.g., 'private')
+    };
+
+    const command = new PutObjectCommand(uploadParams);
+    await s3.send(command);
+
+    // Update the MongoDB document entry with the Cloudflare URL
+    const cloudflareFileUrl = `${process.env.CLOUDFLARE_ENDPOINT}/${process.env.CLOUDFLARE_BUCKET_NAME}/${uploadParams.Key}`;
     const updateResult = await collection.updateOne(
       { formid: formId, user: userId },
-      { $set: { [doc]: filePath } }
+      { $set: { [doc]: cloudflareFileUrl } }  // Save the Cloudflare file URL
     );
 
     if (updateResult.modifiedCount === 1) {
-      res.status(200).send('File uploaded successfully');
+      res.status(200).json({ message: 'File uploaded successfully', fileUrl: cloudflareFileUrl });
     } else {
-      res.status(500).send('Failed to update document status');
+      res.status(500).json({ message: 'Failed to update document status' });
     }
+
   } catch (error) {
     console.error('Error uploading file:', error);
-    res.status(500).send('Error uploading file');
+    res.status(500).json({ error: 'Error uploading file' });
   }
 });
 
