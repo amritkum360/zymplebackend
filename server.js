@@ -28,7 +28,7 @@ const app = express();
 // Cashfree credentials
 Cashfree.XClientId = process.env.Cashfree_XClientId;
 Cashfree.XClientSecret = process.env.Cashfree_XClientSecret;
-Cashfree.XEnvironment = process.env.Cashfree_XEnvironment;
+Cashfree.XEnvironment = Cashfree.Environment.PRODUCTION;
 
 // Ensure uploads directory exists
 // if (!fs.existsSync('uploads')) {
