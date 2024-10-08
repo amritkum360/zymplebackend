@@ -3,6 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
+const { Cashfree } = require('cashfree-pg'); 
+
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getFormsCollection, getDocumentsCollection, getFormStatusesCollection, getRequestsCollection, getPaidsCollection, getcatwiseformCollection } = require('./modules/models/forms');
 const { ObjectId } = require('mongodb');
@@ -23,6 +25,10 @@ const s3 = new S3Client({
 
 
 const app = express();
+// Cashfree credentials
+Cashfree.XClientId = process.env.Cashfree_XClientId;
+Cashfree.XClientSecret = process.env.Cashfree_XClientSecret;
+Cashfree.XEnvironment = process.env.Cashfree_XEnvironment;
 
 // Ensure uploads directory exists
 // if (!fs.existsSync('uploads')) {
@@ -61,6 +67,65 @@ app.get("/", function (req, res) {
   res.send("Your IP is: " + req.ip);
 });
 
+//cashfree-------------------
+app.post('/create-order', async (req, res) => {
+  // console.log(req.body)
+  //   const { orderId, customerPhone, customerId, amount } = req.body;
+    const { orderId, customerPhone, customerId, amount } = req.body;
+  
+    // Order request payload
+    const request = {
+      "order_amount": amount,
+      "order_currency": "INR",
+      "order_id": orderId,
+      "customer_details": {
+          "customer_id": customerId,
+          "customer_phone": customerPhone
+      },
+      "order_meta": {
+          "return_url": "https://www.cashfree.com/devstudio/preview/pg/web/popupCheckout?order_id={order_id}"
+      }
+    };
+    console.log(request)
+    Cashfree.PGCreateOrder("2023-08-01", request).then((response) => {
+      console.log('Order created successfully:',response.data);
+      res.send(response.data)
+  }).catch((error) => {
+      console.error('Error:', error.response.data.message);
+  });})
+
+
+  //cashfree payment status check 
+  app.post('/paymentstatus', async (req, res) => {
+    console.log(req.body);
+    const { orderId } = req.body;
+    console.log(orderId);
+
+    Cashfree.PGOrderFetchPayments("2023-08-01", orderId)
+        .then(async (response) => {
+            console.log('Order fetched successfully:', response.data);
+            let orderStatus;
+
+            if (response.data[0].payment_status === "SUCCESS") {
+                orderStatus = "Success";
+            } else if (response.data[0].payment_status === "PENDING") {
+                orderStatus = "Pending";
+            } else {
+                orderStatus = "Failure";
+            }
+
+            // Send JSON response
+            res.json({ status: orderStatus });
+            console.log('orderStatus', response.data[0].payment_status);
+        })
+        .catch((error) => {
+            console.error('Error:', error.response.data.message);
+            res.status(500).json({ error: error.response.data.message });
+        });
+});
+
+
+
 app.post('/myorders', async (req, res) => {
   try {
     const { userid } = req.body;
@@ -94,6 +159,8 @@ app.post('/myorders', async (req, res) => {
 
 // Endpoint to handle payment processing
 app.post('/api/paidamount', async (req, res) => {
+  console.log("api / paidamount")
+  console.log(req.body)
   const { formId, user, caste, paidAmount } = req.body;
 
   if (!formId || !user || !caste || !paidAmount) {
